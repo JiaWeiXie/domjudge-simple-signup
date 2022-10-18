@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "domjudge-simple-signup"
+version = "0.1.0"
+description = ""
+authors = ["jasonxie <x5758x@gmail.com>"]
+readme = "README.md"
+packages = [{include = "domjudge_simple_signup"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+streamlit = "^1.13.0"
+domjudge-tool-cli = "^0.2.0"
+environs = "^9.5.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^22.10.0"
+isort = "^5.10.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
