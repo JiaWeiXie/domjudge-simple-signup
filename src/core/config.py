@@ -45,7 +45,7 @@ AFFILIATION_COUNTRY = env.str("AFFILIATION_COUNTRY", "TWN")
 USER_ROLES = env.list("USER_ROLES", [], subcast=int)
 VERSION = env.str("VERSION")
 API_VERSION = env.str("API_VERSION")
-GOOGLEFORM_ID = env.opstr("GOOGLEFORM_ID")
+GOOGLEFORM_ID = env.opstr("GOOGLEFORM_ID", None)
 
 settings = Settings(
     host=HOST,
