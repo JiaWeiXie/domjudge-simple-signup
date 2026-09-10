@@ -189,7 +189,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "domjudge-tool-cli", specifier = ">=0.4.0,<0.5" },
+    { name = "domjudge-tool-cli", specifier = ">=0.5.0,<0.6" },
     { name = "environs", specifier = ">=15.2.0,<16" },
     { name = "httpx", specifier = ">=0.28.1,<0.29" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.13.5,<3" },
@@ -206,7 +206,7 @@ dev = [
 
 [[package]]
 name = "domjudge-tool-cli"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -216,9 +216,9 @@ dependencies = [
     { name = "tablib" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e7/ae/e6c2b9ad4d38ee79b9f999d8380d24fef7e3d9af2ca6da873765bcf718dc/domjudge_tool_cli-0.4.0.tar.gz", hash = "sha256:f6a5f308c24f609e73b8beb8c3f5831de999819691df291b7a4645209516dfd8", size = 21942, upload-time = "2026-09-10T09:24:13.47Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/64/f2e722e0d59edd88e4de441e55cbc901e9f7703b7157aa077c4ba8afc9da/domjudge_tool_cli-0.5.0.tar.gz", hash = "sha256:a5d18e2ab44992b08617bd191e76dd5f4ae178e643dadf8bf1c7bf416d525cb2", size = 38890, upload-time = "2026-09-10T11:54:46.454Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0e/03/d761aed15903ea247634aef7c04b70a00c7b13ed05d8ed1265103c7d1965/domjudge_tool_cli-0.4.0-py3-none-any.whl", hash = "sha256:1b713ed9aa75152c4d0efa7d67d7a6a4c0e8d1336567bff093396188d93ae032", size = 37208, upload-time = "2026-09-10T09:24:12.367Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/c7/2d2a2c34ed231dc9d28e796253d7e11351252541f73dacd437e221c919c0/domjudge_tool_cli-0.5.0-py3-none-any.whl", hash = "sha256:6321b5d53254727d2a9a36f8f10958b5560620223af47f14c89cff1318c6ca02", size = 37842, upload-time = "2026-09-10T11:54:47.592Z" },
 ]
 
 [[package]]
