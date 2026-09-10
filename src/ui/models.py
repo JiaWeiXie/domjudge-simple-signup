@@ -1,6 +1,4 @@
-from typing import List, Optional
-
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class NewUser(BaseModel):
@@ -9,7 +7,7 @@ class NewUser(BaseModel):
     email: EmailStr
     password: str
     enabled: bool = True
-    roles: List[str] = []
-    team_id: Optional[str]
-    team: Optional[str]
-    affiliation: Optional[str] = None
+    roles: list[str] = Field(default_factory=list)
+    team_id: str | None = None
+    team: str | None = None
+    affiliation: str | None = None
