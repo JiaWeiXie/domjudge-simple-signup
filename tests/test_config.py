@@ -63,6 +63,9 @@ GOOGLEFORM_ID=
     env_file.write_text(env_content, encoding="utf-8")
 
     s = load_settings(env_file)
+    assert s.disable_ssl is False
+    assert s.timeout == 60.0
+    assert s.affiliation_country == "TWN"
     assert s.max_connections is None
     assert s.max_keepalive_connections is None
     assert s.category_id is None
@@ -101,6 +104,31 @@ API_VERSION=v4
 def test_load_settings_missing_required_keys(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("HOST=https://example.test\n", encoding="utf-8")
+
+    with pytest.raises((environs.EnvError, ValidationError)):
+        load_settings(env_file)
+
+
+@pytest.mark.parametrize(
+    "missing_key", ["HOST", "USERNAME", "PASSWORD", "VERSION", "API_VERSION"]
+)
+def test_load_settings_each_required_key_is_required(
+    tmp_path: Path,
+    missing_key: str,
+) -> None:
+    values = {
+        "HOST": "https://example.test",
+        "USERNAME": "user",
+        "PASSWORD": "password",
+        "VERSION": "7.3.2",
+        "API_VERSION": "v4",
+    }
+    values.pop(missing_key)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(f"{key}={value}" for key, value in values.items()),
+        encoding="utf-8",
+    )
 
     with pytest.raises((environs.EnvError, ValidationError)):
         load_settings(env_file)

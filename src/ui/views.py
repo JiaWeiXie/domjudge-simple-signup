@@ -30,9 +30,9 @@ class MainInterface:
             formdata = NewUser.model_validate(
                 {
                     "username": username or None,
-                    "name": school_name or None,
                     "email": email or None,
                     "password": password or None,
+                    "name": f"{school_name}_{username}" if school_name else None,
                 }
             )
             account = await self.controller.creat_account(formdata)
@@ -40,36 +40,33 @@ class MainInterface:
             st.success("新增成功")
             st.write(
                 account.model_dump(
-                    include={
-                        "username",
-                        "name",
-                        "email",
-                    }
+                    include={"username", "email", "password", "name"},
                 )
             )
         except ValidationError as e:
             error_messages: dict[str, Any] = {}
             for error in e.errors():
-                loc = error.get("loc", ())
-                first_loc = str(loc[0]) if loc else ""
-                key = field_mapping.get(first_loc, first_loc)
-                error_messages[key] = error["msg"]
-
+                for field in error["loc"]:
+                    if field in field_mapping:
+                        error_messages[field_mapping[field]] = error["msg"]
             st.write(error_messages)
         except DuplicatedError as e:
             st.write(
-                {
-                    "message": e.message,
-                }
+                f"<div style='color:red;'>{e}</div><br/>",
+                unsafe_allow_html=True,
             )
 
     async def make_form(self) -> None:
         with st.form("signup_form"):
             email_val = st.text_input("email*", autocomplete="email")
-            school_name_val = st.text_input("學校名稱*")
-            username_val = st.text_input("自訂帳號*")
+            username_val = st.text_input(
+                "帳號*",
+                max_chars=16,
+                autocomplete="username",
+            )
+            st.markdown("系統顯示名稱將會是`{學校名稱}_{帳號}`")
             password_val = st.text_input(
-                "自訂密碼*",
+                "密碼*",
                 type="password",
                 autocomplete="new-password",
             )
@@ -78,19 +75,25 @@ class MainInterface:
                 type="password",
                 autocomplete="new-password",
             )
+            school_name_help_msg = "ex: 國立臺北商業大學，請填寫`北商大`。"
+            school_name_val = st.text_input(
+                "學校名稱*",
+                max_chars=32,
+                help=school_name_help_msg,
+            )
+            st.markdown(school_name_help_msg)
 
-            submit_button = st.form_submit_button("送出")
-
-            if submit_button:
-                if password_val != confirm_password_val:
-                    st.error("密碼與確認密碼不符!")
-                else:
+            submitted = st.form_submit_button("送出")
+            if submitted:
+                if password_val == confirm_password_val:
                     await self.submit_form(
                         username=username_val,
                         email=email_val,
                         password=password_val,
                         school_name=school_name_val,
                     )
+                else:
+                    st.write("密碼與確認密碼不符!")
 
     async def render(self) -> None:
         text = "DOMjudge 申請帳號表單:"

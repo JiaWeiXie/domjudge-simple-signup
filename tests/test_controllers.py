@@ -1,6 +1,7 @@
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -49,7 +50,6 @@ def test_googleform_with_id_posts_formdata() -> None:
         email="test@example.com",  # type: ignore[arg-type]
         password="pwd",
     )
-
     recorded_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -67,6 +67,17 @@ def test_googleform_with_id_posts_formdata() -> None:
     assert len(recorded_requests) == 1
     req = recorded_requests[0]
     assert "FORM_123" in str(req.url)
+    payload = parse_qs(req.content.decode())
+    assert set(payload) == {
+        "entry.2005418205",
+        "entry.533178960",
+        "emailAddress",
+        "entry.55480983",
+    }
+    assert payload["entry.2005418205"] == ["test_user"]
+    assert payload["entry.533178960"] == ["Test School"]
+    assert payload["emailAddress"] == ["test@example.com"]
+    assert payload["entry.55480983"] == ["streamlit-form"]
 
 
 def test_creat_account_duplicate_username_raises_error() -> None:
@@ -129,10 +140,6 @@ def test_creat_account_success() -> None:
     mock_web.__aenter__.return_value = mock_web
     mock_web.__aexit__.return_value = None
     mock_web.login.return_value = None
-    mock_web.get_affiliation.return_value = None
-    mock_affil = MagicMock()
-    mock_affil.id = "42"
-    mock_web.create_affiliation.return_value = mock_affil
     mock_web.create_team_and_user.return_value = ("team_10", "user_10")
     mock_web.set_user_password.return_value = None
 
@@ -150,9 +157,41 @@ def test_creat_account_success() -> None:
 
     assert result.username == "fresh_coder"
     mock_web.login.assert_awaited_once()
-    mock_web.create_team_and_user.assert_awaited_once()
+    mock_web.create_team_and_user.assert_awaited_once_with(
+        ANY,
+        1,
+        2,
+    )
     mock_web.set_user_password.assert_awaited_once_with(
         "user_10",
         "secret_fresh_password",
         [3],
     )
+
+
+def test_creat_account_duplicate_name_does_not_mutate() -> None:
+    settings = make_settings()
+    controller = MainController(settings)
+    user = NewUser(
+        username="new_coder",
+        name="Existing School",
+        email="coder@example.com",  # type: ignore[arg-type]
+        password="pwd",
+    )
+
+    mock_users_api = AsyncMock()
+    mock_users_api.__aenter__.return_value = mock_users_api
+    existing = MagicMock()
+    existing.username = "other_coder"
+    existing.name = "Existing School"
+    mock_users_api.all_users.return_value = [existing]
+    mock_gateway = MagicMock()
+
+    with (
+        patch("ui.controllers.UsersAPI", return_value=mock_users_api),
+        patch("ui.controllers.DomServerWebGateway", mock_gateway),
+    ):
+        with pytest.raises(DuplicatedError):
+            asyncio.run(controller.creat_account(user))
+
+    mock_gateway.assert_not_called()

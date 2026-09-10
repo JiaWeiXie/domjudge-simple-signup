@@ -78,25 +78,23 @@ class MainController:
         async with DomServerWeb(**self.settings.api_params) as web:
             await web.login()
 
-            affiliation_name = formdata.name
-            affiliation = await web.get_affiliation(affiliation_name)
-
-            if affiliation and affiliation.id:
-                affiliation_id = (
-                    int(affiliation.id) if affiliation.id.isdigit() else None
-                )
+            if formdata.affiliation:
+                affiliation = await web.get_affiliation(formdata.affiliation)
+                if affiliation and affiliation.id and affiliation.id.isdigit():
+                    affiliation_id = int(affiliation.id)
+                else:
+                    affiliation = await web.create_affiliation(
+                        formdata.affiliation,
+                        formdata.affiliation,
+                        self.settings.affiliation_country or "TWN",
+                    )
+                    affiliation_id = (
+                        int(affiliation.id)
+                        if affiliation.id and affiliation.id.isdigit()
+                        else None
+                    )
             else:
-                country = self.settings.affiliation_country or "TWN"
-                affiliation = await web.create_affiliation(
-                    affiliation_name,
-                    affiliation_name,
-                    country,
-                )
-                affiliation_id = (
-                    int(affiliation.id)
-                    if affiliation and affiliation.id and affiliation.id.isdigit()
-                    else None
-                )
+                affiliation_id = self.settings.affiliation_id
 
             if affiliation_id is None:
                 raise ValueError("AFFILIATION_ID is required to create an account.")
