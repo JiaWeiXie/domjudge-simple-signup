@@ -91,14 +91,14 @@ API_VERSION=v4
     monkeypatch.setenv("HOST", "https://env.example.test")
     monkeypatch.setenv("USERNAME", "env_user")
     monkeypatch.setenv("PASSWORD", "env_pass")
-    monkeypatch.setenv("VERSION", "8.1.3")
+    monkeypatch.setenv("VERSION", "8.3.1")
     monkeypatch.setenv("API_VERSION", "v4")
 
     s = load_settings(env_file)
     assert str(s.host) == "https://env.example.test/"
     assert s.username == "env_user"
     assert s.password == "env_pass"
-    assert s.version == "8.1.3"
+    assert s.version == "8.3.1"
 
 
 def test_load_settings_missing_required_keys(tmp_path: Path) -> None:
