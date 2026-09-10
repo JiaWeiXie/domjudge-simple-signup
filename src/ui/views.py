@@ -1,6 +1,7 @@
 from typing import Any
 
 import streamlit as st
+from domjudge_tool_cli.services.web import DomServerWebGateway
 from pydantic import ValidationError
 
 from core.config import Settings
@@ -99,4 +100,8 @@ class MainInterface:
         text = "DOMjudge 申請帳號表單:"
         st.title(text)
         st.text(str(self.settings.host))
+        gateway_cls = DomServerWebGateway(self.settings.version)
+        st.caption(
+            f"DOMjudge {self.settings.version} ({gateway_cls.__module__}.{gateway_cls.__name__})"
+        )
         await self.make_form()
