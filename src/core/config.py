@@ -8,6 +8,49 @@ ENV_FILE = pathlib.Path(__file__).with_name(".env")
 
 class Settings(DomServerClient):
     google_form_id: str | None = None
+    min_password_length: int | None = None
+    # Set when the server reports its own minimum; see
+    # BaseDomServerWeb.get_min_password_length.
+    detected_min_password_length: int | None = None
+
+    @property
+    def effective_min_password_length(self) -> int:
+        """Minimum password length the target DOMjudge enforces on signup.
+
+        The server's own value is ground truth: it rejects shorter passwords
+        regardless of configuration, so a lower configured value would only make
+        the form advertise a policy that fails after the team and user exist. A
+        configured value may therefore raise the floor but never lower it.
+        Precedence: server value floors the configured value; without a server
+        value the configured value applies, then a version-derived guess.
+        """
+        configured = (
+            max(self.min_password_length, 0)
+            if self.min_password_length is not None
+            else None
+        )
+        if self.detected_min_password_length is not None:
+            detected = max(self.detected_min_password_length, 0)
+            return max(detected, configured or 0)
+        if configured is not None:
+            return configured
+        return _default_min_password_length(self.version)
+
+
+def _default_min_password_length(version: str) -> int:
+    """Minimum user password length enforced by the DOMjudge web UI.
+
+    DOMjudge added a 10 byte minimum in 8.0 and still ships 10 in 8.3, measured
+    with PHP strlen() so multi-byte characters count once per UTF-8 byte. Older
+    releases (7.x) accept any non-empty password. Unknown versions fall back to
+    the 8.x minimum so an account is never created without a password.
+    """
+    parts = version.strip().split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return 10
+    return 10 if (major, minor) >= (8, 0) else 0
 
 
 def _optional_int(env: environs.Env, name: str) -> int | None:
@@ -64,6 +107,7 @@ def load_settings(env_file: pathlib.Path = ENV_FILE) -> Settings:
     version = env.str("VERSION")
     api_version = env.str("API_VERSION")
     google_form_id = _optional_str(env, "GOOGLEFORM_ID")
+    min_password_length = _optional_int(env, "MIN_PASSWORD_LENGTH")
 
     return Settings(
         host=host,  # type: ignore[arg-type]
@@ -80,6 +124,7 @@ def load_settings(env_file: pathlib.Path = ENV_FILE) -> Settings:
         version=version,
         api_version=api_version,
         google_form_id=google_form_id,
+        min_password_length=min_password_length,
     )
 
 

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from core.config import Settings
-from ui.controllers import MainController
+from ui.controllers import AccountCreationError, MainController
 from ui.models import NewUser
 
 LOGIN_HTML = """<!doctype html>
@@ -177,3 +177,126 @@ async def test_creat_account_v8_domjudge_integration() -> None:
     user_post = captured_posts["user_edit"]
     assert user_post["user[plainPassword]"] == ["v8-password"]
     assert user_post["user[user_roles][]"] == ["3"]
+
+
+@pytest.mark.anyio
+async def test_creat_account_v8_rolls_back_when_domjudge_rejects_password() -> None:
+    """DOMjudge 8.x re-renders the edit form when the password fails validation.
+
+    Regression: the team and user already exist at that point, so the account
+    must be removed instead of leaving a passwordless user behind.
+    """
+    captured: dict[str, Any] = {"deleted": [], "team_add_count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method
+
+        if path == "/login" and method == "GET":
+            return httpx.Response(200, text=LOGIN_HTML)
+        if path == "/login" and method == "POST":
+            return httpx.Response(302, headers={"Location": "/jury"})
+        if path == "/jury" and method == "GET":
+            return httpx.Response(200, text="<html><body>Jury</body></html>")
+
+        if path == "/jury/teams/add" and method == "GET":
+            return httpx.Response(200, text=TEAM_ADD_HTML)
+        if path == "/jury/teams/add" and method == "POST":
+            captured["team_add_count"] += 1
+            return httpx.Response(302, headers={"Location": "/jury/teams/77"})
+        if path == "/jury/teams/77" and method == "GET":
+            return httpx.Response(200, text=TEAM_VIEW_HTML)
+
+        if path == "/jury/users/7/edit" and method == "GET":
+            return httpx.Response(200, text=USER_EDIT_HTML)
+        if path == "/jury/users/7/edit" and method == "POST":
+            # DOMjudge rejects the password and re-renders the same URL.
+            return httpx.Response(
+                200,
+                text=USER_EDIT_HTML
+                + "<div class='alert alert-danger'>Password should be 10+ chars.</div>",
+            )
+
+        if path == "/jury/users" and method == "GET":
+            captured["users_list"] = True
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><table><tbody><tr>"
+                    '<td><a href="/jury/users/7">test-v8-user</a></td>'
+                    '<td><a href="/jury/users/7/edit">edit</a></td>'
+                    '<td><a href="/jury/users/7/delete">delete</a></td>'
+                    "</tr></tbody></table></body></html>"
+                ),
+            )
+        if path == "/jury/users/7/delete" and method == "GET":
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><form method='post' action='/jury/users/7/delete'>"
+                    "<input type='hidden' name='_token' value='t'>"
+                    "</form></body></html>"
+                ),
+            )
+        if path == "/jury/users/7/delete" and method == "POST":
+            captured["deleted"].append("user")
+            return httpx.Response(302, headers={"Location": "/jury/users"})
+
+        if path == "/jury/teams" and method == "GET":
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><table><tbody><tr>"
+                    '<td><a href="/jury/teams/77">77</a></td>'
+                    '<td><a href="/jury/teams/77">team</a></td>'
+                    '<td><a href="/jury/teams/77/edit">edit</a></td>'
+                    '<td><a href="/jury/teams/77/delete">delete</a></td>'
+                    '<td><a href="/jury/clarifications/send?teamto=77">clar</a></td>'
+                    "</tr></tbody></table></body></html>"
+                ),
+            )
+        if path == "/jury/teams/77/delete" and method == "GET":
+            return httpx.Response(
+                200,
+                text=(
+                    "<html><body><form method='post' action='/jury/teams/77/delete'>"
+                    "<input type='hidden' name='_token' value='t'>"
+                    "</form></body></html>"
+                ),
+            )
+        if path == "/jury/teams/77/delete" and method == "POST":
+            captured["deleted"].append("team")
+            return httpx.Response(302, headers={"Location": "/jury/teams"})
+
+        return httpx.Response(404)
+
+    settings = make_signup_settings(user_roles=[3])
+    controller = MainController(settings)
+    form_user = NewUser(
+        username="test-v8-user",
+        name="Test V8 User",
+        password="v8-password",
+        email="v8@example.org",
+    )
+    mock_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://example.test",
+    )
+
+    with (
+        patch("ui.controllers.UsersAPI") as mock_users_api_cls,
+        patch(
+            "domjudge_tool_cli.services.web.v8.DomServerWeb.new_client",
+            return_value=mock_client,
+        ),
+    ):
+        mock_api = AsyncMock()
+        mock_api.all_users.return_value = []
+        mock_users_api_cls.return_value.__aenter__.return_value = mock_api
+
+        with pytest.raises(AccountCreationError) as exc_info:
+            await controller.creat_account(form_user)
+
+    assert "test-v8-user" in str(exc_info.value)
+    assert captured["team_add_count"] == 1
+    assert captured["deleted"] == ["user", "team"]

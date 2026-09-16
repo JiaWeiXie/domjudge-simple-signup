@@ -4,7 +4,7 @@ import environs
 import pytest
 from pydantic import ValidationError
 
-from core.config import load_settings
+from core.config import Settings, load_settings
 
 
 def test_load_settings_all_valid_keys(tmp_path: Path) -> None:
@@ -132,3 +132,122 @@ def test_load_settings_each_required_key_is_required(
 
     with pytest.raises((environs.EnvError, ValidationError)):
         load_settings(env_file)
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("8.3.1", 10),
+        ("8.1.3", 10),
+        ("8.0.0", 10),
+        ("7.3.2", 0),
+        ("7.3.4", 0),
+        ("banana", 10),
+    ],
+)
+def test_effective_min_password_length_follows_domjudge_version(
+    version: str,
+    expected: int,
+) -> None:
+    settings = Settings(  # type: ignore[arg-type]
+        host="https://example.test",
+        username="user",
+        password="password",
+        version=version,
+        api_version="v4",
+    )
+
+    assert settings.effective_min_password_length == expected
+
+
+def test_explicit_min_password_length_overrides_version_default(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        """HOST=https://example.test
+USERNAME=user
+PASSWORD=password
+VERSION=8.3.1
+API_VERSION=v4
+MIN_PASSWORD_LENGTH=25
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(env_file)
+
+    assert settings.effective_min_password_length == 25
+
+
+def test_negative_min_password_length_is_clamped_to_zero() -> None:
+    settings = Settings(  # type: ignore[arg-type]
+        host="https://example.test",
+        username="user",
+        password="password",
+        version="8.3.1",
+        api_version="v4",
+        min_password_length=-5,
+    )
+
+    assert settings.effective_min_password_length == 0
+
+
+def test_server_value_floors_a_lower_configured_value() -> None:
+    """The server rejects shorter passwords regardless of configuration.
+
+    If the form advertised the lower configured value it would promise a policy
+    that fails after the team and user already exist.
+    """
+    settings = Settings(  # type: ignore[arg-type]
+        host="https://example.test",
+        username="user",
+        password="password",
+        version="8.3.1",
+        api_version="v4",
+        min_password_length=4,
+        detected_min_password_length=10,
+    )
+
+    assert settings.effective_min_password_length == 10
+
+
+def test_configured_value_may_raise_the_server_floor() -> None:
+    """An operator may enforce something stricter than the server does."""
+    settings = Settings(  # type: ignore[arg-type]
+        host="https://example.test",
+        username="user",
+        password="password",
+        version="8.3.1",
+        api_version="v4",
+        min_password_length=25,
+        detected_min_password_length=10,
+    )
+
+    assert settings.effective_min_password_length == 25
+
+
+def test_without_a_server_value_the_configured_value_applies() -> None:
+    settings = Settings(  # type: ignore[arg-type]
+        host="https://example.test",
+        username="user",
+        password="password",
+        version="8.3.1",
+        api_version="v4",
+        min_password_length=4,
+    )
+
+    assert settings.effective_min_password_length == 4
+
+
+def test_server_value_applies_when_nothing_is_configured() -> None:
+    settings = Settings(  # type: ignore[arg-type]
+        host="https://example.test",
+        username="user",
+        password="password",
+        version="7.3.2",  # version default would be 0
+        api_version="v4",
+        detected_min_password_length=12,
+    )
+
+    assert settings.effective_min_password_length == 12

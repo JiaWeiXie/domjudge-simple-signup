@@ -7,7 +7,14 @@ import httpx
 import pytest
 
 from core.config import Settings
-from ui.controllers import DuplicatedError, MainController
+from ui.controllers import (
+    AccountCreationError,
+    DuplicatedError,
+    InvalidPasswordError,
+    MainController,
+    _rejection_reason,
+    password_byte_length,
+)
 from ui.models import NewUser
 
 
@@ -22,6 +29,7 @@ def make_settings(**kwargs: Any) -> Settings:
         "user_roles": [3],
         "version": "7.3.2",
         "api_version": "v4",
+        "min_password_length": 0,
     }
     defaults.update(kwargs)
     return Settings(**defaults)  # type: ignore[arg-type]
@@ -195,3 +203,525 @@ def test_creat_account_duplicate_name_does_not_mutate() -> None:
             asyncio.run(controller.creat_account(user))
 
     mock_gateway.assert_not_called()
+
+
+def _mock_web(**overrides: Any) -> AsyncMock:
+    mock_web = AsyncMock()
+    mock_web.__aenter__.return_value = mock_web
+    mock_web.__aexit__.return_value = None
+    mock_web.login.return_value = None
+    mock_web.create_team_and_user.return_value = ("team_10", "user_10")
+    mock_web.set_user_password.return_value = None
+    # Default to "server advertises nothing", matching the installed release.
+    mock_web.get_min_password_length.return_value = None
+    for name, value in overrides.items():
+        setattr(mock_web, name, value)
+    return mock_web
+
+
+def _mock_users_api() -> AsyncMock:
+    mock_users_api = AsyncMock()
+    mock_users_api.__aenter__.return_value = mock_users_api
+    mock_users_api.__aexit__.return_value = None
+    mock_users_api.all_users.return_value = []
+    return mock_users_api
+
+
+def _run_creat_account(
+    settings: Settings,
+    user: NewUser,
+    mock_web: AsyncMock,
+    mock_users_api: AsyncMock | None = None,
+) -> NewUser:
+    if mock_users_api is None:
+        mock_users_api = _mock_users_api()
+    mock_cls = MagicMock(return_value=mock_web)
+    mock_gateway_cls = MagicMock(return_value=mock_cls)
+
+    with (
+        patch("ui.controllers.UsersAPI", return_value=mock_users_api),
+        patch("ui.controllers.DomServerWebGateway", mock_gateway_cls),
+    ):
+        controller = MainController(settings)
+        return asyncio.run(controller.creat_account(user))
+
+
+def test_creat_account_rejects_short_password_before_any_write() -> None:
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="shortpw_coder",
+        name="shortpw_School",
+        email="shortpw@example.com",  # type: ignore[arg-type]
+        password="123456",
+    )
+    mock_web = _mock_web()
+
+    with pytest.raises(InvalidPasswordError) as exc_info:
+        _run_creat_account(settings, user, mock_web)
+
+    message = str(exc_info.value)
+    assert "至少需 10 個位元組" in message
+    assert "目前為 6 個位元組" in message
+    mock_web.login.assert_not_awaited()
+    mock_web.create_team_and_user.assert_not_awaited()
+    mock_web.set_user_password.assert_not_awaited()
+
+
+def test_creat_account_accepts_password_at_minimum_length() -> None:
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="exactpw_coder",
+        name="exactpw_School",
+        email="exactpw@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web()
+
+    result = _run_creat_account(settings, user, mock_web)
+
+    assert result == user
+    mock_web.set_user_password.assert_awaited_once_with(
+        "user_10",
+        "abcdefghij",
+        [3],
+    )
+
+
+def test_creat_account_accepts_multibyte_password_meeting_byte_minimum() -> None:
+    """DOMjudge measures with PHP strlen(), i.e. UTF-8 bytes.
+
+    4 CJK characters are 4 Python characters but 12 bytes, which DOMjudge
+    accepts. Counting characters here would reject a valid password.
+    """
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="cjkpw_coder",
+        name="cjkpw_School",
+        email="cjkpw@example.com",  # type: ignore[arg-type]
+        password="密碼測試",
+    )
+    mock_web = _mock_web()
+
+    result = _run_creat_account(settings, user, mock_web)
+
+    assert result == user
+    mock_web.set_user_password.assert_awaited_once_with(
+        "user_10",
+        "密碼測試",
+        [3],
+    )
+
+
+def test_creat_account_rejects_multibyte_password_below_byte_minimum() -> None:
+    """3 CJK characters are 9 bytes, which DOMjudge rejects."""
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="cjk3_coder",
+        name="cjk3_School",
+        email="cjk3@example.com",  # type: ignore[arg-type]
+        password="密碼測",
+    )
+    mock_web = _mock_web()
+
+    with pytest.raises(InvalidPasswordError):
+        _run_creat_account(settings, user, mock_web)
+
+    mock_web.create_team_and_user.assert_not_awaited()
+
+
+def test_creat_account_rolls_back_user_and_team_when_password_fails() -> None:
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="rollback_coder",
+        name="rollback_School",
+        email="rollback@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web(
+        set_user_password=AsyncMock(
+            side_effect=AssertionError("User set password fail. user_10")
+        )
+    )
+
+    with pytest.raises(AccountCreationError) as exc_info:
+        _run_creat_account(settings, user, mock_web)
+
+    message = str(exc_info.value)
+    assert "rollback_coder" in message
+    # The raw exception can embed the internal DOMjudge URL, so it must not be
+    # echoed to an anonymous applicant.
+    assert "User set password fail. user_10" not in message
+    mock_web.delete_users.assert_awaited_once_with(include=["rollback_coder"])
+    mock_web.delete_teams.assert_awaited_once_with(include=["team_10"])
+
+
+def test_creat_account_reports_orphan_when_rollback_fails() -> None:
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="orphan_coder",
+        name="orphan_School",
+        email="orphan@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web(
+        set_user_password=AsyncMock(side_effect=AssertionError("nope")),
+        delete_users=AsyncMock(side_effect=RuntimeError("delete users failed")),
+    )
+
+    with pytest.raises(AccountCreationError) as exc_info:
+        _run_creat_account(settings, user, mock_web)
+
+    message = str(exc_info.value)
+    assert "orphan_coder" in message
+    assert "使用者" in message
+    assert "delete users failed" not in message
+    mock_web.delete_users.assert_awaited_once_with(include=["orphan_coder"])
+    mock_web.delete_teams.assert_awaited_once_with(include=["team_10"])
+
+
+def test_rollback_reports_orphan_when_user_survives_deletion() -> None:
+    """The delete helpers silently no-op when nothing matches.
+
+    A surviving user must be reported, not assumed deleted just because the
+    delete call raised nothing.
+    """
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="survivor_coder",
+        name="survivor_School",
+        email="survivor@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web(
+        set_user_password=AsyncMock(side_effect=AssertionError("nope")),
+    )
+    surviving = MagicMock()
+    surviving.username = "survivor_coder"
+    mock_users_api = _mock_users_api()
+    # First call is the duplicate pre-check (empty), later calls are the
+    # post-rollback verification, which must still see the user.
+    mock_users_api.all_users.side_effect = [[], [surviving]]
+
+    with pytest.raises(AccountCreationError) as exc_info:
+        _run_creat_account(settings, user, mock_web, mock_users_api)
+
+    message = str(exc_info.value)
+    assert "survivor_coder" in message
+    assert "使用者" in message
+    assert "未建立帳號" not in message
+
+
+def test_rollback_reports_success_when_user_is_gone() -> None:
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="cleaned_coder",
+        name="cleaned_School",
+        email="cleaned@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web(
+        set_user_password=AsyncMock(side_effect=AssertionError("nope")),
+    )
+
+    with pytest.raises(AccountCreationError) as exc_info:
+        _run_creat_account(settings, user, mock_web)
+
+    assert "未建立帳號" in str(exc_info.value)
+
+
+def test_duplicate_username_reported_before_password_policy() -> None:
+    """A duplicate submission must keep reporting the duplicate.
+
+    The password check runs before any write, but after the read-only duplicate
+    lookup, so a duplicate account with a short password still reports 帳號重複.
+    """
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="taken_coder",
+        name="taken_School",
+        email="taken@example.com",  # type: ignore[arg-type]
+        password="123",  # also too short
+    )
+    existing = MagicMock()
+    existing.username = "taken_coder"
+    existing.name = "Other School"
+    mock_users_api = _mock_users_api()
+    mock_users_api.all_users.return_value = [existing]
+    mock_web = _mock_web()
+
+    with (
+        patch("ui.controllers.UsersAPI", return_value=mock_users_api),
+        patch("ui.controllers.DomServerWebGateway", MagicMock(return_value=mock_web)),
+    ):
+        controller = MainController(settings)
+        with pytest.raises(DuplicatedError) as exc_info:
+            asyncio.run(controller.creat_account(user))
+
+    assert "帳號重複" in str(exc_info.value)
+    mock_web.create_team_and_user.assert_not_awaited()
+
+
+def test_password_policy_measured_in_utf8_bytes() -> None:
+    assert password_byte_length("密碼測試") == 12
+    assert password_byte_length("123456") == 6
+    assert password_byte_length("密碼測試") > len("密碼測試")
+
+
+def test_differing_only_in_case_username_is_a_clean_duplicate() -> None:
+    """DOMjudge's username column is case-insensitive.
+
+    Submitting only a case variant used to pass the pre-check and then trip
+    DOMjudge's unique constraint, surfacing a raw 500 to the applicant.
+    """
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="CaseCoder",
+        name="case_School",
+        email="case@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    existing = MagicMock()
+    existing.username = "casecoder"
+    existing.name = "Other School"
+    mock_users_api = _mock_users_api()
+    mock_users_api.all_users.return_value = [existing]
+    mock_web = _mock_web()
+
+    with (
+        patch("ui.controllers.UsersAPI", return_value=mock_users_api),
+        patch("ui.controllers.DomServerWebGateway", MagicMock(return_value=mock_web)),
+    ):
+        controller = MainController(settings)
+        with pytest.raises(DuplicatedError) as exc_info:
+            asyncio.run(controller.creat_account(user))
+
+    assert "帳號重複" in str(exc_info.value)
+    mock_web.create_team_and_user.assert_not_awaited()
+
+
+def test_server_reported_minimum_overrides_a_lower_configured_value() -> None:
+    """An operator setting below the server's real floor must not be trusted.
+
+    Otherwise the form advertises a policy DOMjudge rejects, producing a
+    create-then-rollback round trip for a password the form said was fine.
+    """
+    settings = make_settings(min_password_length=4)
+    user = NewUser(
+        username="detect_coder",
+        name="detect_School",
+        email="detect@example.com",  # type: ignore[arg-type]
+        password="123456",  # 6 bytes: passes the configured 4, fails the server's 10
+    )
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
+
+    with pytest.raises(InvalidPasswordError) as exc_info:
+        _run_creat_account(settings, user, mock_web)
+
+    assert "10" in str(exc_info.value)
+    mock_web.create_team_and_user.assert_not_awaited()
+
+
+def test_server_reported_minimum_is_consulted_before_writing() -> None:
+    settings = make_settings(min_password_length=0)
+    user = NewUser(
+        username="detect_ok",
+        name="detect_School",
+        email="detect2@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
+
+    result = _run_creat_account(settings, user, mock_web)
+
+    assert result == user
+    mock_web.get_min_password_length.assert_awaited_once()
+
+
+def test_rejection_reason_surfaces_domjudge_feedback_only() -> None:
+    """DOMjudge's own validation text is shown; transport text never is."""
+
+    class FakeFormSubmitError(Exception):
+        def __init__(self, details: list[str]) -> None:
+            self.details = details
+            super().__init__("User set password fail. 7")
+
+    assert (
+        _rejection_reason(FakeFormSubmitError(["Password should be 10+ chars."]))
+        == "Password should be 10+ chars."
+    )
+    # No details attribute, or empty details, yields nothing. This keeps a raw
+    # transport message (which can embed an internal URL) out of the UI.
+    assert _rejection_reason(RuntimeError("server 500 at http://internal.host")) is None
+    assert _rejection_reason(FakeFormSubmitError([])) is None
+
+
+def test_affiliation_created_for_the_signup_is_rolled_back() -> None:
+    """An affiliation created for the signup must not outlive a failed signup."""
+    settings = make_settings(min_password_length=10, affiliation_id=None)
+    user = NewUser(
+        username="affil_coder",
+        name="affil_School",
+        email="affil@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+        affiliation="Test University",
+    )
+    created = MagicMock()
+    created.id = "42"
+    mock_web = _mock_web(
+        get_affiliation=AsyncMock(return_value=None),
+        create_affiliation=AsyncMock(return_value=created),
+        set_user_password=AsyncMock(side_effect=AssertionError("nope")),
+        delete_affiliation=AsyncMock(return_value=1),
+    )
+
+    with pytest.raises(AccountCreationError):
+        _run_creat_account(settings, user, mock_web)
+
+    mock_web.delete_affiliation.assert_awaited_once_with("42")
+
+
+def test_pre_existing_affiliation_is_not_rolled_back() -> None:
+    """Only an affiliation this call created may be deleted."""
+    settings = make_settings(min_password_length=10, affiliation_id=None)
+    user = NewUser(
+        username="reuse_coder",
+        name="reuse_School",
+        email="reuse@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+        affiliation="Existing University",
+    )
+    existing = MagicMock()
+    existing.id = "7"
+    mock_web = _mock_web(
+        get_affiliation=AsyncMock(return_value=existing),
+        set_user_password=AsyncMock(side_effect=AssertionError("nope")),
+        delete_affiliation=AsyncMock(return_value=1),
+    )
+
+    with pytest.raises(AccountCreationError):
+        _run_creat_account(settings, user, mock_web)
+
+    mock_web.delete_affiliation.assert_not_awaited()
+
+
+def test_affiliation_orphan_reported_when_library_cannot_delete_it() -> None:
+    """Without delete_affiliation the affiliation cannot be removed.
+
+    That is a real orphan, so it must be reported instead of the signup being
+    claimed as cleanly rolled back.
+    """
+    settings = make_settings(min_password_length=10, affiliation_id=None)
+    user = NewUser(
+        username="noaff_coder",
+        name="noaff_School",
+        email="noaff@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+        affiliation="Test University",
+    )
+    created = MagicMock()
+    created.id = "42"
+    mock_web = _mock_web(
+        get_affiliation=AsyncMock(return_value=None),
+        create_affiliation=AsyncMock(return_value=created),
+        set_user_password=AsyncMock(side_effect=AssertionError("nope")),
+    )
+    # Simulate the shipping 0.5.0 library, which has no delete_affiliation.
+    del mock_web.delete_affiliation
+
+    with pytest.raises(AccountCreationError) as exc_info:
+        _run_creat_account(settings, user, mock_web)
+
+    message = str(exc_info.value)
+    assert "學校" in message
+    assert "未建立帳號" not in message
+
+
+def test_missing_detection_on_older_library_falls_back_to_configured_value() -> None:
+    """On domjudge-tool-cli 0.5.0 the gateway has no detection method.
+
+    The configured/derived value must still apply and the signup must proceed.
+    """
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="nofallback_coder",
+        name="nofallback_School",
+        email="nofallback@example.com",  # type: ignore[arg-type]
+        password="123456",
+    )
+    mock_web = _mock_web()
+    del mock_web.get_min_password_length
+
+    with pytest.raises(InvalidPasswordError):
+        _run_creat_account(settings, user, mock_web)
+
+    mock_web.create_team_and_user.assert_not_awaited()
+
+
+def test_detection_returning_a_non_integer_is_ignored() -> None:
+    """An unexpected return value must not be compared against a length."""
+    settings = make_settings(min_password_length=10)
+    user = NewUser(
+        username="weirddetect",
+        name="weird_School",
+        email="weird@example.com",  # type: ignore[arg-type]
+        password="abcdefghij",
+    )
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value="ten"))
+
+    result = _run_creat_account(settings, user, mock_web)
+
+    assert result == user
+    mock_web.set_user_password.assert_awaited_once()
+
+
+def test_advertised_policy_matches_the_server_not_the_configuration() -> None:
+    """The value the form advertises must equal the value enforced.
+
+    With MIN_PASSWORD_LENGTH=4 against a server requiring 10, the form used to
+    advertise 4 while enforcement demanded 10, so a submission the form
+    described as valid was rejected after creating the team and user.
+    """
+    settings = make_settings(min_password_length=4)
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
+    mock_cls = MagicMock(return_value=mock_web)
+    mock_gateway_cls = MagicMock(return_value=mock_cls)
+
+    with patch("ui.controllers.DomServerWebGateway", mock_gateway_cls):
+        controller = MainController(settings)
+        detected = asyncio.run(controller.refresh_min_password_length())
+
+    assert detected == 10
+    assert settings.detected_min_password_length == 10
+    # The advertised value (read by the form) now matches enforcement.
+    assert settings.effective_min_password_length == 10
+
+
+def test_advertised_policy_falls_back_when_server_reports_nothing() -> None:
+    settings = make_settings(min_password_length=4)
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=None))
+    mock_cls = MagicMock(return_value=mock_web)
+    mock_gateway_cls = MagicMock(return_value=mock_cls)
+
+    with patch("ui.controllers.DomServerWebGateway", mock_gateway_cls):
+        controller = MainController(settings)
+        detected = asyncio.run(controller.refresh_min_password_length())
+
+    assert detected is None
+    assert settings.detected_min_password_length is None
+    assert settings.effective_min_password_length == 4
+
+
+def test_policy_probe_failure_does_not_break_the_form() -> None:
+    settings = make_settings(min_password_length=4)
+    mock_web = _mock_web(
+        login=AsyncMock(side_effect=RuntimeError("connection refused"))
+    )
+    mock_cls = MagicMock(return_value=mock_web)
+    mock_gateway_cls = MagicMock(return_value=mock_cls)
+
+    with patch("ui.controllers.DomServerWebGateway", mock_gateway_cls):
+        controller = MainController(settings)
+        detected = asyncio.run(controller.refresh_min_password_length())
+
+    assert detected is None
+    assert settings.effective_min_password_length == 4
