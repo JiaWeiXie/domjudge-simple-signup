@@ -803,3 +803,71 @@ def test_policy_refresh_is_due_only_after_a_successful_read_expires() -> None:
     settings.record_detected_min_password_length(10, 5.0)
     assert settings.policy_refresh_due(5.0 + POLICY_TTL_SECONDS - 0.1) is False
     assert settings.policy_refresh_due(5.0 + POLICY_TTL_SECONDS) is True
+
+
+def _existing_user(username: str, name: str) -> MagicMock:
+    existing = MagicMock()
+    existing.username = username
+    existing.name = name
+    return existing
+
+
+def _users_api_with(*existing: MagicMock) -> AsyncMock:
+    mock_users_api = _mock_users_api()
+    mock_users_api.all_users.return_value = list(existing)
+    return mock_users_api
+
+
+def test_username_contained_in_an_existing_one_is_not_a_duplicate() -> None:
+    settings = make_settings(min_password_length=0)
+    users_api = _users_api_with(_existing_user("amy2", "Other_School_amy2"))
+
+    result = _submit(
+        settings, _new_user("amy"), _mock_web(), FakeClock(), mock_users_api=users_api
+    )
+
+    assert result.username == "amy"
+
+
+def test_username_containing_an_existing_one_is_not_a_duplicate() -> None:
+    settings = make_settings(min_password_length=0)
+    users_api = _users_api_with(_existing_user("amy", "Other_School_amy"))
+
+    result = _submit(
+        settings, _new_user("amy2"), _mock_web(), FakeClock(), mock_users_api=users_api
+    )
+
+    assert result.username == "amy2"
+
+
+def test_identical_username_in_another_case_is_still_a_duplicate() -> None:
+    settings = make_settings(min_password_length=0)
+    users_api = _users_api_with(_existing_user("amy", "Other_School_amy"))
+    mock_web = _mock_web()
+
+    with pytest.raises(DuplicatedError) as exc_info:
+        _submit(
+            settings,
+            _new_user("AMY"),
+            mock_web,
+            FakeClock(),
+            mock_users_api=users_api,
+        )
+
+    assert "帳號重複" in str(exc_info.value)
+    mock_web.create_team_and_user.assert_not_awaited()
+
+
+def test_display_name_is_compared_exactly() -> None:
+    settings = make_settings(min_password_length=0)
+    user = _new_user("amy")  # display name "amy_School"
+    near = _users_api_with(_existing_user("other", "amy_School2"))
+    exact = _users_api_with(_existing_user("other", "amy_School"))
+
+    assert (
+        _submit(settings, user, _mock_web(), FakeClock(), mock_users_api=near) == user
+    )
+    with pytest.raises(DuplicatedError) as exc_info:
+        _submit(settings, user, _mock_web(), FakeClock(), mock_users_api=exact)
+
+    assert "名稱重複" in str(exc_info.value)
