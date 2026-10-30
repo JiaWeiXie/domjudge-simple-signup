@@ -131,9 +131,9 @@ class MainController:
         # casefolded to keep the pre-check in step with the server.
         username_key = formdata.username.casefold()
         duplicated_username_list = [
-            it.username for it in users if username_key in it.username.casefold()
+            it.username for it in users if it.username.casefold() == username_key
         ]
-        duplicated_name_list = [it.name for it in users if formdata.name in it.name]
+        duplicated_name_list = [it.name for it in users if it.name == formdata.name]
 
         if duplicated_username_list:
             raise DuplicatedError(f"帳號重複, {formdata.username}")
