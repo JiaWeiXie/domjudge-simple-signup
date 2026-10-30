@@ -5,6 +5,10 @@ from domjudge_tool_cli.models.domserver import DomServerClient
 
 ENV_FILE = pathlib.Path(__file__).with_name(".env")
 
+# How long the server's minimum password length is trusted before the next
+# submission reads it again.
+POLICY_TTL_SECONDS = 900.0
+
 
 class Settings(DomServerClient):
     google_form_id: str | None = None
@@ -12,6 +16,22 @@ class Settings(DomServerClient):
     # Set when the server reports its own minimum; see
     # BaseDomServerWeb.get_min_password_length.
     detected_min_password_length: int | None = None
+    # Monotonic time of the last successful read of that value.
+    detected_min_password_length_at: float | None = None
+
+    def policy_refresh_due(self, now: float) -> bool:
+        """Whether the server's minimum has not been read within the TTL.
+
+        This object is the process-wide singleton, so the answer is shared by
+        every session. Only a successful read starts the TTL, so a failed read
+        is retried by the next submission, as before.
+        """
+        read_at = self.detected_min_password_length_at
+        return read_at is None or now - read_at >= POLICY_TTL_SECONDS
+
+    def record_detected_min_password_length(self, value: int, now: float) -> None:
+        self.detected_min_password_length = value
+        self.detected_min_password_length_at = now
 
     @property
     def effective_min_password_length(self) -> int:
