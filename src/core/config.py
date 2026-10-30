@@ -22,9 +22,10 @@ class Settings(DomServerClient):
     def policy_refresh_due(self, now: float) -> bool:
         """Whether the server's minimum has not been read within the TTL.
 
-        This object is the process-wide singleton, so the answer is shared by
-        every session. Only a successful read starts the TTL, so a failed read
-        is retried by the next submission, as before.
+        The value is kept per server process: this object is a singleton within
+        one process, so the answer applies to that process's own sessions, and
+        separate replicas do not share it. Only a successful read starts the
+        TTL, so a failed read is retried by the next submission, as before.
         """
         read_at = self.detected_min_password_length_at
         return read_at is None or now - read_at >= POLICY_TTL_SECONDS
