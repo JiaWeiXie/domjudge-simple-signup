@@ -1,0 +1,47 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install mise and project tools
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: 2026.10.22
+          cache: true
+
+      # Settings are read when the app modules are imported, so the tests need
+      # these variables. They are placeholders and point at no real server.
+      - name: Create placeholder settings
+        run: |
+          printf '%s\n' \
+            'HOST=https://domserver.example.test' \
+            'USERNAME=placeholder' \
+            'PASSWORD=placeholder' \
+            'VERSION=8.3.1' \
+            'API_VERSION=v4' > src/core/.env
+
+      - name: Install locked dependencies
+        run: mise run install
+
+      - name: Run quality checks
+        run: mise run check
