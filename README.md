@@ -11,13 +11,19 @@ Signup hardening depends on `domjudge-tool-cli` 0.6.0 (published on PyPI):
 
 | Capability | On 0.5.0 | On 0.6.0 |
 |---|---|---|
-| Server-reported minimum password length | Not read; the form shows the configured/version-derived value | The form advertises the server's own value and enforces it |
+| Server-reported minimum password length | Not read; the form shows the configured/version-derived value | Submissions are checked against the server's own value, which is read during a submit (at most every 15 minutes, shared by all sessions); the form advertises it once a submit has read it |
 | Rejection detail on a failed password write | Only a generic message | DOMjudge's own validation message is shown |
 | Removing an affiliation created for a failed signup | Impossible; reported to the applicant as an orphan | Rolled back |
 
 The app detects each capability at runtime, so 0.5.0 still runs: it enforces the
 configured value and reports anything it cannot clean up instead of claiming
 success. `uv.lock` pins 0.6.0, so a normal install gets all three.
+
+Opening the page never contacts DOMjudge: the app logs in only when a signup is
+submitted. After a restart the form's password hint shows the configured or
+version-derived minimum until the first submission has read the server's value.
+The check that runs before anything is written always uses the server's value
+once it has been read, and a failed read is retried by the next submission.
 
 `MIN_PASSWORD_LENGTH` may raise the floor above the server's value but never
 lower it, because the server rejects shorter passwords regardless and a lower

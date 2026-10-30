@@ -111,19 +111,8 @@ class MainInterface:
         st.caption(
             f"DOMjudge {self.settings.version} ({gateway_cls.__module__}.{gateway_cls.__name__})"
         )
-        await self.ensure_password_policy()
+        # Rendering never contacts DOMjudge. The help text shows the server's
+        # minimum once a submission has read it; until then (and after a restart)
+        # it shows the configured or version-derived value, and submissions are
+        # still checked against the server's value before anything is written.
         await self.make_form()
-
-    async def ensure_password_policy(self) -> None:
-        """Learn the server's password policy once per session.
-
-        The form's help text and the enforcement both read
-        effective_min_password_length, so they agree only if the server value is
-        known before the form renders. The session flag records that the probe
-        was attempted, so a server that cannot report a value (an older
-        domjudge-tool-cli) is not re-probed on every rerun.
-        """
-        if st.session_state.get("password_policy_loaded"):
-            return
-        st.session_state["password_policy_loaded"] = True
-        await self.controller.refresh_min_password_length()

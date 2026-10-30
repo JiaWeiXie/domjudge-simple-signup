@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -83,8 +84,13 @@ class AccountCreationError(SignupError):
 
 
 class MainController:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.settings = settings
+        self._clock = clock
 
     async def log_to_googleform(self, account: NewUser) -> bool:
         google_form_id = self.settings.google_form_id
@@ -141,13 +147,18 @@ class MainController:
         async with DomServerWeb(**self.settings.api_params) as web:
             await web.login()
 
-            # Ask the server for its own minimum and enforce that, so an
-            # operator setting below the real floor cannot cause a
-            # create-then-rollback round trip.
-            detected = await _server_min_password_length(web)
-            if detected is not None:
-                self.settings.detected_min_password_length = detected
-                self._check_password_policy(formdata.password)
+            # Read the server's own minimum when the shared value has expired
+            # and enforce it before any write, so an operator setting below the
+            # real floor cannot cause a create-then-rollback round trip. The
+            # login above happens for this submission anyway; page renders
+            # never log in. A failed read is not cached and falls back to the
+            # value already checked.
+            now = self._clock()
+            if self.settings.policy_refresh_due(now):
+                detected = await _server_min_password_length(web)
+                if detected is not None:
+                    self.settings.record_detected_min_password_length(detected, now)
+                    self._check_password_policy(formdata.password)
 
             created_affiliation_id: str | None = None
             if formdata.affiliation:
@@ -212,25 +223,6 @@ class MainController:
                 raise AccountCreationError(message) from None
 
             return formdata
-
-    async def refresh_min_password_length(self) -> int | None:
-        """Cache the minimum password length the server itself reports.
-
-        Called before the form renders so the advertised policy matches what
-        the server enforces. Returns the detected value, or None when the
-        installed domjudge-tool-cli cannot report one.
-        """
-        DomServerWeb = DomServerWebGateway(self.settings.version)
-        try:
-            async with DomServerWeb(**self.settings.api_params) as web:
-                await web.login()
-                detected = await _server_min_password_length(web)
-        except Exception:
-            logger.exception("Failed to query the server's password policy")
-            return None
-        if detected is not None:
-            self.settings.detected_min_password_length = detected
-        return detected
 
     def _check_password_policy(self, password: str) -> None:
         """Reject a password the target DOMjudge would refuse.

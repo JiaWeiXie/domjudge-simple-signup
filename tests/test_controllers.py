@@ -6,7 +6,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from core.config import Settings
+from core.config import POLICY_TTL_SECONDS, Settings
 from ui.controllers import (
     AccountCreationError,
     DuplicatedError,
@@ -674,54 +674,132 @@ def test_detection_returning_a_non_integer_is_ignored() -> None:
     mock_web.set_user_password.assert_awaited_once()
 
 
-def test_advertised_policy_matches_the_server_not_the_configuration() -> None:
-    """The value the form advertises must equal the value enforced.
+class FakeClock:
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
 
-    With MIN_PASSWORD_LENGTH=4 against a server requiring 10, the form used to
-    advertise 4 while enforcement demanded 10, so a submission the form
-    described as valid was rejected after creating the team and user.
-    """
-    settings = make_settings(min_password_length=4)
+    def __call__(self) -> float:
+        return self.now
+
+
+def _new_user(username: str, password: str = "abcdefghij") -> NewUser:
+    return NewUser(
+        username=username,
+        name=f"{username}_School",
+        email=f"{username}@example.com",  # type: ignore[arg-type]
+        password=password,
+    )
+
+
+def _submit(
+    settings: Settings,
+    user: NewUser,
+    mock_web: AsyncMock,
+    clock: FakeClock,
+    mock_users_api: AsyncMock | None = None,
+) -> NewUser:
+    """One signup with a fresh controller, as every Streamlit rerun creates."""
+    if mock_users_api is None:
+        mock_users_api = _mock_users_api()
+    mock_gateway_cls = MagicMock(return_value=MagicMock(return_value=mock_web))
+
+    with (
+        patch("ui.controllers.UsersAPI", return_value=mock_users_api),
+        patch("ui.controllers.DomServerWebGateway", mock_gateway_cls),
+    ):
+        controller = MainController(settings, clock=clock)
+        return asyncio.run(controller.creat_account(user))
+
+
+def test_server_minimum_is_read_once_across_submissions() -> None:
+    settings = make_settings(min_password_length=0)
+    clock = FakeClock()
     mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
-    mock_cls = MagicMock(return_value=mock_web)
-    mock_gateway_cls = MagicMock(return_value=mock_cls)
 
-    with patch("ui.controllers.DomServerWebGateway", mock_gateway_cls):
-        controller = MainController(settings)
-        detected = asyncio.run(controller.refresh_min_password_length())
+    _submit(settings, _new_user("first_coder"), mock_web, clock)
+    clock.now += POLICY_TTL_SECONDS - 1
+    _submit(settings, _new_user("second_coder"), mock_web, clock)
 
-    assert detected == 10
-    assert settings.detected_min_password_length == 10
-    # The advertised value (read by the form) now matches enforcement.
+    mock_web.get_min_password_length.assert_awaited_once()
     assert settings.effective_min_password_length == 10
 
 
-def test_advertised_policy_falls_back_when_server_reports_nothing() -> None:
-    settings = make_settings(min_password_length=4)
+def test_server_minimum_is_read_again_after_the_ttl() -> None:
+    settings = make_settings(min_password_length=0)
+    clock = FakeClock()
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
+
+    _submit(settings, _new_user("first_coder"), mock_web, clock)
+    clock.now += POLICY_TTL_SECONDS
+    _submit(settings, _new_user("second_coder"), mock_web, clock)
+
+    assert mock_web.get_min_password_length.await_count == 2
+
+
+def test_failed_read_is_not_cached_and_signup_continues() -> None:
+    settings = make_settings(min_password_length=0)
+    clock = FakeClock()
     mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=None))
-    mock_cls = MagicMock(return_value=mock_web)
-    mock_gateway_cls = MagicMock(return_value=mock_cls)
 
-    with patch("ui.controllers.DomServerWebGateway", mock_gateway_cls):
-        controller = MainController(settings)
-        detected = asyncio.run(controller.refresh_min_password_length())
+    first = _submit(settings, _new_user("first_coder"), mock_web, clock)
+    second = _submit(settings, _new_user("second_coder"), mock_web, clock)
 
-    assert detected is None
+    assert first.username == "first_coder"
+    assert second.username == "second_coder"
+    assert mock_web.get_min_password_length.await_count == 2
     assert settings.detected_min_password_length is None
-    assert settings.effective_min_password_length == 4
 
 
-def test_policy_probe_failure_does_not_break_the_form() -> None:
-    settings = make_settings(min_password_length=4)
+def test_read_error_on_submit_does_not_block_signup() -> None:
+    settings = make_settings(min_password_length=0)
     mock_web = _mock_web(
-        login=AsyncMock(side_effect=RuntimeError("connection refused"))
+        get_min_password_length=AsyncMock(side_effect=RuntimeError("boom"))
     )
-    mock_cls = MagicMock(return_value=mock_web)
-    mock_gateway_cls = MagicMock(return_value=mock_cls)
 
-    with patch("ui.controllers.DomServerWebGateway", mock_gateway_cls):
-        controller = MainController(settings)
-        detected = asyncio.run(controller.refresh_min_password_length())
+    result = _submit(settings, _new_user("error_coder"), mock_web, FakeClock())
 
-    assert detected is None
-    assert settings.effective_min_password_length == 4
+    assert result.username == "error_coder"
+    mock_web.set_user_password.assert_awaited_once()
+
+
+def test_expired_stale_value_is_replaced_before_any_write() -> None:
+    """A lower, expired cached value must not let a short password through.
+
+    The cached 4 allows a 6-byte password at the first check. The server now
+    requires 10, so the refresh after login must reject it before the team and
+    user are created.
+    """
+    settings = make_settings(min_password_length=0)
+    clock = FakeClock()
+    settings.record_detected_min_password_length(4, clock.now)
+    clock.now += POLICY_TTL_SECONDS
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
+
+    with pytest.raises(InvalidPasswordError):
+        _submit(settings, _new_user("stale_coder", password="123456"), mock_web, clock)
+
+    mock_web.create_team_and_user.assert_not_awaited()
+    mock_web.set_user_password.assert_not_awaited()
+    assert settings.detected_min_password_length == 10
+
+
+def test_fresh_cached_value_rejects_without_login_or_server_read() -> None:
+    settings = make_settings(min_password_length=0)
+    clock = FakeClock()
+    settings.record_detected_min_password_length(10, clock.now)
+    mock_web = _mock_web(get_min_password_length=AsyncMock(return_value=10))
+
+    with pytest.raises(InvalidPasswordError):
+        _submit(settings, _new_user("short_coder", password="123456"), mock_web, clock)
+
+    mock_web.login.assert_not_awaited()
+    mock_web.get_min_password_length.assert_not_awaited()
+
+
+def test_policy_refresh_is_due_only_after_a_successful_read_expires() -> None:
+    settings = make_settings()
+    assert settings.policy_refresh_due(5.0) is True
+
+    settings.record_detected_min_password_length(10, 5.0)
+    assert settings.policy_refresh_due(5.0 + POLICY_TTL_SECONDS - 0.1) is False
+    assert settings.policy_refresh_due(5.0 + POLICY_TTL_SECONDS) is True
